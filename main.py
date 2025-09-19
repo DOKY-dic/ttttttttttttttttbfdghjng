@@ -1,337 +1,426 @@
-import os, json, time, random, hashlib, threading
-import requests, schedule, telebot
-from bs4 import BeautifulSoup
-from telebot.types import ReactionTypeEmoji, InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
+import logging
+import sys
+import subprocess
+import importlib
+import csv
+import json
+from datetime import datetime
+from telethon import TelegramClient, errors
+from telethon.tl.types import User, Channel
+import colorama
+from colorama import Fore, Style
 
-# ========== تنظیمات اصلی ==========
-BOT_TOKEN = "8449010749:AAG3NpJch9ArJES6WGLd3LUe71IVxK8vsU4"
-ADMIN_ID = 1391667035
-CHANNEL_ID = "@mamatestbotdoky"
-DATA_FILE = "data.json"
+# Initialize colorama
+colorama.init()
 
-# ========== دسته‌بندی‌ها و تنظیمات ==========
-CATEGORIES = {
-    "غمگین": {
-        "url": "https://taw-bio.ir/category/Depressed",
-        "reaction": "😔"
-    },
-    "موفقیت": {
-        "url": "https://taw-bio.ir/category/Success",
-        "reaction": "🏆"
-    },
-    "treason": {
-        "url": "https://taw-bio.ir/category/treason",
-        "reaction": "💔"
-    },
-    "عشق": {
-        "url": "https://taw-bio.ir/category/Love",
-        "reaction": "❤️"
-    },
-    "Horn": {
-        "url": "https://taw-bio.ir/category/Horn",
-        "reaction": "👑"
-    }
-}
-
-CUSTOM_TEXTS = {
-    "signature": "mamatestbotdoky",
-    "no_permission": "⛔ فقط مدیر دسترسی دارد.",
-    "fill_done": "✅ مطالب بروزرسانی شد!",
-    "send_done": "✅ ارسال انجام شد!",
-}
-
-# ========== توابع مدیریت داده ==========
-def init_data_file():
-    return {
-        "next_id": 1,
-        "posts": [],
-        "last_fill": 0,
-        "last_sent": 0
+# تنظیمات پیشرفته لاگ
+class CustomFormatter(logging.Formatter):
+    """فرمت‌دهنده رنگی برای لاگ‌ها"""
+    format = "%(asctime)s - %(levelname)s - %(message)s"
+    
+    FORMATS = {
+        logging.INFO: Fore.GREEN + format + Style.RESET_ALL,
+        logging.WARNING: Fore.YELLOW + format + Style.RESET_ALL,
+        logging.ERROR: Fore.RED + format + Style.RESET_ALL,
+        logging.CRITICAL: Fore.RED + Style.BRIGHT + format + Style.RESET_ALL,
+        logging.DEBUG: Fore.BLUE + format + Style.RESET_ALL
     }
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return init_data_file()
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+# تنظیمات لاگ
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Handler برای console
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+ch.setFormatter(CustomFormatter())
+logger.addHandler(ch)
+
+# Handler برای فایل
+fh = logging.FileHandler(f'coffee_bot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log', encoding='utf-8')
+fh.setLevel(logging.INFO)
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+fh.setFormatter(file_formatter)
+logger.addHandler(fh)
+
+def install_required_packages():
+    """نصب خودکار پکیج‌های مورد نیاز"""
+    required_packages = {
+        'telethon': 'telethon',
+        'colorama': 'colorama'
+    }
     
-    try:
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return init_data_file()
-
-def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-# ========== توابع استخراج محتوا ==========
-def extract_content(url, category):
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        posts = []
-        articles = soup.find_all('article', class_='iTxt')
-        
-        for article in articles:
-            content_div = article.find('div', class_='t')
-            if not content_div:
-                continue
-                
-            content = content_div.get_text().strip()
-            hashtags = [tag.get_text().strip() 
-                       for tag in article.find_all('a', class_=['a_r', 'c', 'urlac', 'tg']) 
-                       if tag.get_text().strip()]
-            
-            link_tag = article.find('a', class_='a_r')
-            post_link = link_tag['href'] if link_tag and 'href' in link_tag.attrs else url
-            
-            if not post_link.startswith('http'):
-                post_link = f"https://taw-bio.ir{post_link}"
-                
-            content_hash = hashlib.md5(content.encode()).hexdigest()
-            
-            posts.append({
-                'id': None,
-                'content': content,
-                'hashtags': hashtags,
-                'url': post_link,
-                'content_hash': content_hash,
-                'category': category,
-                'sent': False,
-                'timestamp': time.time()
-            })
-            
-        return posts
-    except Exception as e:
-        print(f"Error in extract_content: {str(e)}")
-        return []
-
-# ========== توابع فرمت و ارسال ==========
-def format_post(post):
-    hashtags = post.get('hashtags', [])[:2]
-    tags = " ".join(f"#{tag}" for tag in hashtags) if hashtags else ""
-    
-    # فرمت جدید با نقل قول برای امضای کانال
-    signature = f"\n\n——————————\n📌 @{CUSTOM_TEXTS['signature']}"
-    return f"{post['content']}\n\n{tags}{signature}"
-
-def send_post(post):
-    try:
-        text = format_post(post)
-        sent_msg = bot.send_message(
-            CHANNEL_ID, 
-            text, 
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-        
-        # افزودن ریاکشن مربوط به دسته‌بندی
-        reaction_emoji = ReactionTypeEmoji(CATEGORIES[post['category']]['reaction'])
-        bot.set_message_reaction(
-            CHANNEL_ID, 
-            sent_msg.message_id, 
-            [reaction_emoji], 
-            is_big=False
-        )
-        
-        return True
-    except Exception as e:
-        print(f"Error in send_post: {str(e)}")
-        return False
-
-# ========== پنل مدیریت ==========
-bot = telebot.TeleBot(BOT_TOKEN)
-
-@bot.message_handler(commands=['start'])
-def admin_panel(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, CUSTOM_TEXTS['no_permission'])
-        return
-        
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("📊 وضعیت پست‌ها", callback_data="status"),
-        InlineKeyboardButton("🔄 واکشی مطالب", callback_data="do_fill"),
-        InlineKeyboardButton("📤 ارسال دستی", callback_data="send_manual")
-    )
-    bot.send_message(
-        message.chat.id, 
-        "🎛 پنل مدیریت ربات:",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, CUSTOM_TEXTS['no_permission'])
-        return
-        
-    data = load_data()
-    
-    if call.data == "status":
-        total = len(data['posts'])
-        unsent = sum(1 for p in data['posts'] if not p['sent'])
-        
-        # آمار دسته‌بندی‌ها
-        categories = {cat: {"total": 0, "unsent": 0} for cat in CATEGORIES}
-        for post in data['posts']:
-            cat = post['category']
-            categories[cat]["total"] += 1
-            if not post['sent']:
-                categories[cat]["unsent"] += 1
-        
-        # ساخت متن گزارش
-        status_text = f"📊 آمار کلی:\n"
-        status_text += f"• کل پست‌ها: {total}\n"
-        status_text += f"• ارسال نشده: {unsent}\n\n"
-        status_text += f"📋 آمار دسته‌بندی‌ها:\n"
-        
-        for cat, stats in categories.items():
-            status_text += (
-                f"• {cat}: {stats['total']} پست "
-                f"({stats['unsent']} ارسال نشده)\n"
-            )
-        
-        bot.edit_message_text(
-            status_text,
-            call.message.chat.id,
-            call.message.message_id
-        )
-        
-    elif call.data == "do_fill":
-        bot.answer_callback_query(call.id, "در حال واکشی مطالب...")
-        
-        def fill_task():
+    for package_name, install_name in required_packages.items():
+        try:
+            importlib.import_module(package_name)
+            logger.info(f"✅ {package_name} از قبل نصب است")
+        except ImportError:
+            logger.info(f"📦 در حال نصب {package_name}...")
             try:
-                hashes = {p['content_hash'] for p in data['posts']}
-                added_count = 0
+                subprocess.check_call([sys.executable, "-m", "pip", "install", install_name])
+                logger.info(f"✅ {package_name} با موفقیت نصب شد")
+            except subprocess.CalledProcessError:
+                logger.error(f"❌ خطا در نصب {package_name}")
+                return False
+    return True
+
+class CoffeePromotionBot:
+    def __init__(self):
+        self.client = None
+        self.stats = {
+            'total_members': 0,
+            'messages_sent': 0,
+            'messages_failed': 0,
+            'start_time': None,
+            'end_time': None
+        }
+        self.message_log = []
+        self.member_data = []
+    
+    def create_coffee_message(self):
+        """ایجاد پیام تبلیغاتی حرفه‌ای برای قهوه"""
+        message = """☕️ **پخش اختصاصی قهوه در استان قم** ☕️
+
+🌟 **ویژگی‌های منحصر به فرد قهوه ما:**
+• ✅ قهوه اصل و با کیفیت عالی
+• ✅ آسیاب تازه و روزانه
+• ✅ ترکیبات ویژه و طعم‌های منحصر به فرد
+• ✅ مناسب برای تمام سلیقه‌ها
+
+🏪 **خدمات ما:**
+• 🔥 قهوه ترک و اسپرسو
+• 🍵 انواع کاپوچینو و لاته
+• 🎁 بسته‌بندی شکیل و هدیه
+• 🚚 ارسال رایگان در شهر قم
+
+📞 **برای سفارش و اطلاعات بیشتر:**
+• 📲 تماس: 0912-XXX-XXXX
+• 📍 آدرس: قم، میدان معلم، پخش قهوه اختصاصی
+
+⏰ **ساعات کاری:** 
+• روزهای شنبه تا پنجشنبه: ۸ صبح تا ۱۰ شب
+• جمعه‌ها: ۴ بعدازظهر تا ۱۰ شب
+
+✨ **اولین سفارش: ۲۰٪ تخفیف ویژه!**
+کد تخفیف: **COFFEE20**
+
+☕️ *یک فنجان قهوه فوق‌العاده رو از دست نده!*"""
+        
+        return message
+    
+    async def initialize_client(self, api_id, api_hash, phone_number):
+        """راه‌اندازی کلاینت تلگرام"""
+        try:
+            self.client = TelegramClient(
+                session=f'session_{phone_number}',
+                api_id=api_id,
+                api_hash=api_hash,
+                device_model="Coffee Promotion Bot",
+                system_version="1.0",
+                app_version="2.0"
+            )
+            
+            await self.client.start(phone=phone_number)
+            logger.info("✅ کلاینت تلگرام راه‌اندازی شد")
+            return True
+            
+        except errors.PhoneNumberInvalidError:
+            logger.error("❌ شماره تلفن نامعتبر است")
+        except errors.PhoneCodeInvalidError:
+            logger.error("❌ کد تأیید نامعتبر است")
+        except errors.PhoneCodeExpiredError:
+            logger.error("❌ کد تأیید منقضی شده است")
+        except errors.SessionPasswordNeededError:
+            logger.error("❌ نیاز به رمز دوم (2FA) است")
+        except Exception as e:
+            logger.error(f"❌ خطا در راه‌اندازی کلاینت: {e}")
+        
+        return False
+    
+    async def get_group_info(self, group_link):
+        """دریافت اطلاعات گروه و استخراج اعضا"""
+        try:
+            entity = await self.client.get_entity(group_link)
+            
+            if isinstance(entity, Channel):
+                participants = await self.client.get_participants(entity)
+                real_users = [p for p in participants if isinstance(p, User) and not p.bot]
                 
-                for cat, info in CATEGORIES.items():
-                    posts = extract_content(info["url"], cat)
-                    for post in posts:
-                        if post['content_hash'] in hashes:
-                            continue
-                            
-                        post['id'] = data['next_id']
-                        data['next_id'] += 1
-                        data['posts'].append(post)
-                        added_count += 1
-                        
-                save_data(data)
-                bot.send_message(call.message.chat.id, f"✅ {added_count} پست جدید افزوده شد")
+                # ذخیره اطلاعات اعضا
+                self.member_data = []
+                for user in real_users:
+                    self.member_data.append({
+                        'user_id': user.id,
+                        'username': user.username,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name,
+                        'phone': user.phone,
+                        'is_bot': user.bot
+                    })
+                
+                group_info = {
+                    'entity': entity,
+                    'title': entity.title,
+                    'id': entity.id,
+                    'member_count': len(real_users),
+                    'participants': real_users
+                }
+                
+                logger.info(f"✅ گروه پیدا شد: {entity.title}")
+                logger.info(f"👥 تعداد اعضای واقعی: {len(real_users)}")
+                
+                return group_info
+            else:
+                logger.error("❌ لینک مربوط به گروه نیست")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ خطا در دریافت اطلاعات گروه: {e}")
+            return None
+    
+    async def send_message_to_members(self, group_info, message_text, delay_between_messages=3, max_messages=30):
+        """ارسال پیام به اعضای گروه"""
+        if not group_info or not group_info['participants']:
+            logger.error("❌ اطلاعات گروه یا لیست اعضا نامعتبر است")
+            return False
+        
+        self.stats['start_time'] = datetime.now()
+        self.stats['total_members'] = len(group_info['participants'])
+        
+        logger.info(f"📨 شروع ارسال پیام به {len(group_info['participants'])} عضو...")
+        
+        success_count = 0
+        fail_count = 0
+        
+        for i, user in enumerate(group_info['participants'][:max_messages]):
+            try:
+                # ارسال پیام
+                await self.client.send_message(user.id, message_text)
+                success_count += 1
+                self.stats['messages_sent'] += 1
+                
+                # لاگ پیام موفق
+                log_entry = {
+                    'timestamp': datetime.now().isoformat(),
+                    'user_id': user.id,
+                    'username': user.username or 'ندارد',
+                    'first_name': user.first_name or 'ندارد',
+                    'status': 'success',
+                    'message': 'پیام تبلیغاتی قهوه'
+                }
+                self.message_log.append(log_entry)
+                
+                logger.info(f"✅ [{i+1}/{min(len(group_info['participants']), max_messages)}] "
+                           f"پیام به {user.first_name or 'کاربر'} ارسال شد")
+                
+                # تأخیر بین پیام‌ها
+                if i < len(group_info['participants'][:max_messages]) - 1:
+                    await asyncio.sleep(delay_between_messages)
+                    
+            except errors.FloodWaitError as e:
+                fail_count += 1
+                self.stats['messages_failed'] += 1
+                logger.warning(f"⏳ FloodWait: منتظر {e.seconds} ثانیه...")
+                await asyncio.sleep(e.seconds)
+                
             except Exception as e:
-                bot.send_message(call.message.chat.id, f"خطا در واکشی: {str(e)}")
+                fail_count += 1
+                self.stats['messages_failed'] += 1
+                logger.error(f"❌ خطا در ارسال به {user.first_name or 'کاربر'}: {e}")
+                await asyncio.sleep(1)
         
-        threading.Thread(target=fill_task).start()
-        
-    elif call.data == "send_manual":
-        markup = InlineKeyboardMarkup(row_width=5)
-        buttons = [
-            InlineKeyboardButton(str(i), callback_data=f"manual_count_{i}") 
-            for i in range(1, 11)
-        ]
-        markup.add(*buttons)
-        markup.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-        
-        bot.edit_message_text(
-            "تعداد پست‌های ارسالی را انتخاب کنید:",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-        
-    elif call.data.startswith("manual_count_"):
-        count = int(call.data.split("_")[-1])
-        unsent = [p for p in data['posts'] if not p['sent']]
-        
-        if not unsent:
-            bot.answer_callback_query(call.id, "⚠️ پست ارسال نشده‌ای وجود ندارد")
+        self.stats['end_time'] = datetime.now()
+        return True
+    
+    async def send_report_to_admin(self, admin_username="@alireza_y85"):
+        """ارسال گزارش به ادمین"""
+        try:
+            report_message = f"""📊 **گزارش اجرای ربات تبلیغاتی قهوه**
+
+🏪 **موضوع:** پخش اختصاصی قهوه در قم
+⏰ **زمان اجرا:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+📈 **آمار ارسال:**
+• ✅ پیام‌های موفق: {self.stats['messages_sent']}
+• ❌ پیام‌های ناموفق: {self.stats['messages_failed']}
+• 👥 کل اعضای گروه: {self.stats['total_members']}
+
+🕒 **مدت زمان:** {self.stats['end_time'] - self.stats['start_time'] if self.stats['end_time'] else 'N/A'}
+
+📋 **لیست اعضای گروه:** (تعداد: {len(self.member_data)})
+"""
+            # ارسال گزارش به ادمین
+            await self.client.send_message(admin_username, report_message)
+            logger.info(f"✅ گزارش به {admin_username} ارسال شد")
+            
+            # ارسال فایل لیست اعضا
+            if self.member_data:
+                csv_content = "User ID,Username,First Name,Last Name,Phone\n"
+                for member in self.member_data:
+                    csv_content += f"{member['user_id']},{member['username'] or 'N/A'},{member['first_name'] or 'N/A'},{member['last_name'] or 'N/A'},{member['phone'] or 'N/A'}\n"
+                
+                # ذخیره موقت و ارسال فایل
+                with open('members_list.csv', 'w', encoding='utf-8') as f:
+                    f.write(csv_content)
+                
+                await self.client.send_file(admin_username, 'members_list.csv', caption="📋 لیست کامل اعضای گروه")
+                logger.info("✅ فایل لیست اعضا ارسال شد")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ خطا در ارسال گزارش: {e}")
+            return False
+    
+    def save_logs(self):
+        """ذخیره لاگ‌ها در فایل‌های مختلف"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # فایل CSV لاگ‌ها
+            csv_filename = f'coffee_bot_log_{timestamp}.csv'
+            with open(csv_filename, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Timestamp', 'User ID', 'Username', 'First Name', 'Status'])
+                
+                for log in self.message_log:
+                    writer.writerow([
+                        log['timestamp'],
+                        log.get('user_id', ''),
+                        log.get('username', ''),
+                        log.get('first_name', ''),
+                        log.get('status', '')
+                    ])
+            
+            # فایل CSV اعضا
+            members_filename = f'group_members_{timestamp}.csv'
+            with open(members_filename, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['User ID', 'Username', 'First Name', 'Last Name', 'Phone', 'Is Bot'])
+                
+                for member in self.member_data:
+                    writer.writerow([
+                        member['user_id'],
+                        member['username'] or 'ندارد',
+                        member['first_name'] or 'ندارد',
+                        member['last_name'] or 'ندارد',
+                        member['phone'] or 'ندارد',
+                        'بله' if member['is_bot'] else 'خیر'
+                    ])
+            
+            logger.info(f"💾 گزارش‌ها ذخیره شدند:")
+            logger.info(f"   📄 {csv_filename} (لاگ ارسال)")
+            logger.info(f"   👥 {members_filename} (لیست اعضا)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ خطا در ذخیره لاگ‌ها: {e}")
+            return False
+    
+    def print_summary(self):
+        """چاپ خلاصه گزارش در کنسول"""
+        if self.stats['start_time'] and self.stats['end_time']:
+            duration = self.stats['end_time'] - self.stats['start_time']
+            
+            print("\n" + "=" * 60)
+            print("🎯 خلاصه گزارش ربات تبلیغاتی قهوه")
+            print("=" * 60)
+            print(f"🏁 زمان شروع: {self.stats['start_time'].strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"🛑 زمان پایان: {self.stats['end_time'].strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"⏱️  مدت زمان: {duration}")
+            print(f"👥 کل اعضای گروه: {self.stats['total_members']}")
+            print(f"✅ پیام‌های موفق: {Fore.GREEN}{self.stats['messages_sent']}{Style.RESET_ALL}")
+            print(f"❌ پیام‌های ناموفق: {Fore.RED}{self.stats['messages_failed']}{Style.RESET_ALL}")
+            print(f"📋 اطلاعات {len(self.member_data)} عضو ذخیره شد")
+            print("=" * 60)
+
+async def main():
+    """تابع اصلی"""
+    print(Fore.CYAN + "=" * 60)
+    print("🤖 ربات حرفه‌ای تبلیغات قهوه - قم")
+    print("=" * 60 + Style.RESET_ALL)
+    
+    # نصب خودکار پکیج‌ها
+    if not install_required_packages():
+        return
+    
+    # اطلاعات API
+    API_ID = 29302960
+    API_HASH = 'a4d12409d7f982dc02842538a9c633a0'
+    PHONE_NUMBER = '09208085485'
+    GROUP_LINK = 'https://t.me/testmybot12j'
+    ADMIN_USERNAME = "@alireza_y85"
+    
+    # ایجاد نمونه ربات
+    bot = CoffeePromotionBot()
+    
+    try:
+        # راه‌اندازی کلاینت
+        if not await bot.initialize_client(API_ID, API_HASH, PHONE_NUMBER):
             return
         
-        bot.answer_callback_query(call.id, f"در حال ارسال {count} پست...")
+        # دریافت اطلاعات گروه
+        group_info = await bot.get_group_info(GROUP_LINK)
+        if not group_info:
+            return
         
-        def send_task():
-            try:
-                to_send = random.sample(unsent, min(count, len(unsent)))
-                success_count = 0
-                
-                for post in to_send:
-                    if send_post(post):
-                        post['sent'] = True
-                        success_count += 1
-                    time.sleep(1)  # جلوگیری از محدودیت ارسال
-                
-                save_data(data)
-                bot.send_message(call.message.chat.id, f"✅ {success_count} پست با موفقیت ارسال شد")
-            except Exception as e:
-                bot.send_message(call.message.chat.id, f"خطا در ارسال: {str(e)}")
+        # ایجاد پیام تبلیغاتی
+        message_text = bot.create_coffee_message()
         
-        threading.Thread(target=send_task).start()
+        # نمایش پیام برای تأیید
+        print(Fore.YELLOW + "\n📝 پیام تبلیغاتی:" + Style.RESET_ALL)
+        print("=" * 50)
+        print(message_text[:200] + "...")  # نمایش بخشی از پیام
+        print("=" * 50)
         
-    elif call.data == "back_main":
-        admin_panel(call.message)
-
-# ========== اجرای زمان‌بندی‌ها ==========
-def scheduler_thread():
-    # زمان‌بندی‌ها:
-    # هر 6 ساعت یکبار مطالب جدید واکشی شود
-    schedule.every(6).hours.do(run_fill_command)
-    
-    # هر 3 ساعت یک پست ارسال شود
-    schedule.every(3).hours.do(send_scheduled_posts)
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
-
-def run_fill_command():
-    print("Starting fill process...")
-    data = load_data()
-    hashes = {p['content_hash'] for p in data['posts']}
-    added_count = 0
-    
-    for cat, info in CATEGORIES.items():
-        posts = extract_content(info["url"], cat)
-        for post in posts:
-            if post['content_hash'] in hashes:
-                continue
-                
-            post['id'] = data['next_id']
-            data['next_id'] += 1
-            data['posts'].append(post)
-            added_count += 1
+        print(f"\n📋 گروه: {group_info['title']}")
+        print(f"👥 تعداد اعضا: {group_info['member_count']}")
+        
+        confirm = input(Fore.RED + "\n⚠️  آیا می‌خواهید ارسال پیام شروع شود؟ (y/n): " + Style.RESET_ALL)
+        if confirm.lower() != 'y':
+            print("❌ ارسال لغو شد")
+            return
+        
+        # ارسال پیام‌ها
+        if await bot.send_message_to_members(
+            group_info=group_info,
+            message_text=message_text,
+            delay_between_messages=3,  # تأخیر 3 ثانیه بین پیام‌ها
+            max_messages=30  # حداکثر 30 پیام
+        ):
+            # ارسال گزارش به ادمین
+            await bot.send_report_to_admin(ADMIN_USERNAME)
             
-    data['last_fill'] = time.time()
-    save_data(data)
-    print(f"Fill completed! Added {added_count} new posts.")
-
-def send_scheduled_posts():
-    data = load_data()
-    unsent = [p for p in data['posts'] if not p['sent']]
-    
-    if not unsent:
-        print("No unsent posts available.")
-        return
+            # ذخیره لاگ‌ها
+            bot.save_logs()
+            
+            # نمایش خلاصه
+            bot.print_summary()
+            
+            print(Fore.GREEN + "🎉 ربات با موفقیت اجرا شد! گزارش به ادمین ارسال گردید." + Style.RESET_ALL)
         
-    # انتخاب تصادفی از تمام دسته‌بندی‌ها
-    post = random.choice(unsent)
-    
-    if send_post(post):
-        post['sent'] = True
-        data['last_sent'] = time.time()
-        save_data(data)
-        print(f"Sent post #{post['id']} from {post['category']} category")
+    except KeyboardInterrupt:
+        logger.warning("⏹️  ربات توسط کاربر متوقف شد")
+    except Exception as e:
+        logger.error(f"❌ خطای غیرمنتظره: {e}")
+    finally:
+        if bot.client:
+            await bot.client.disconnect()
+            logger.info("🔌 اتصال قطع شد")
 
-# ========== اجرای اصلی ==========
 if __name__ == "__main__":
-    print("Starting bot and scheduler...")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⏹️  برنامه توسط کاربر متوقف شد")
+    except Exception as e:
+        print(f"❌ خطای критиی: {e}")
     
-    # اجرای زمان‌بندی‌ها در یک ریسه جداگانه
-    scheduler_thread = threading.Thread(target=scheduler_thread, daemon=True)
-    scheduler_thread.start()
-    
-    # اجرای بات
-    bot.infinity_polling()
+    input("\nبرای خروج، Enter را فشار دهید...")
